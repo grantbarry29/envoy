@@ -183,6 +183,7 @@ EXTENSIONS = {
     #       configured on the listener. Do not remove it in that case or configs will fail to load.
     "envoy.filters.listener.proxy_protocol":            "//source/extensions/filters/listener/proxy_protocol:config",
     "envoy.filters.listener.tls_inspector":             "//source/extensions/filters/listener/tls_inspector:config",
+    "envoy.filters.listener.dtls_inspector":            "//source/extensions/filters/listener/dtls_inspector:config",
 
     #
     # Network filters

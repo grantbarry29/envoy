@@ -7,15 +7,15 @@ load(
 
 licenses(["notice"])  # Apache 2
 
-# TLS inspector filter for examining various TLS parameters before routing to a FilterChain.
-# Public docs: https://envoyproxy.io/docs/envoy/latest/configuration/listeners/listener_filters/tls_inspector
+# DTLS inspector filter for examining various DTLS parameters before routing to a FilterChain.
+# Public docs: TODO
 
 envoy_extension_package()
 
 envoy_cc_library(
-    name = "tls_inspector_lib",
-    srcs = ["tls_inspector.cc"],
-    hdrs = ["tls_inspector.h"],
+    name = "dtls_inspector_lib",
+    srcs = ["dtls_inspector.cc"],
+    hdrs = ["dtls_inspector.h"],
     external_deps = ["ssl"],
     deps = [
         "//envoy/event:dispatcher_interface",
@@ -28,7 +28,7 @@ envoy_cc_library(
         "//source/common/common:hex_lib",
         "//source/common/common:minimal_logger_lib",
         "//source/common/protobuf:utility_lib",
-        "@envoy_api//envoy/extensions/filters/listener/tls_inspector/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/listener/dtls_inspector/v3:pkg_cc_proto",
     ],
 )
 
@@ -38,7 +38,7 @@ envoy_cc_extension(
     deps = [
         "//envoy/registry",
         "//envoy/server:filter_config_interface",
-        "//source/extensions/filters/listener/tls_inspector:tls_inspector_lib",
-        "@envoy_api//envoy/extensions/filters/listener/tls_inspector/v3:pkg_cc_proto",
+        "//source/extensions/filters/listener/dtls_inspector:dtls_inspector_lib",
+        "@envoy_api//envoy/extensions/filters/listener/dtls_inspector/v3:pkg_cc_proto",
     ],
 )

@@ -1,5 +1,6 @@
 #include <string>
 
+#include "dtls_inspector.h"
 #include "envoy/extensions/filters/listener/dtls_inspector/v3/dtls_inspector.pb.h"
 #include "envoy/extensions/filters/listener/dtls_inspector/v3/dtls_inspector.pb.validate.h"
 #include "envoy/registry/registry.h"
@@ -15,12 +16,11 @@ namespace DtlsInspector {
 /**
  * Config registration for the DTLS inspector filter. @see NamedNetworkFilterConfigFactory.
  */
-class DtlsInspectorConfigFactory : public Server::Configuration::NamedListenerFilterConfigFactory {
+class DtlsInspectorConfigFactory : public Server::Configuration::NamedUdpListenerFilterConfigFactory {
 public:
-  // NamedListenerFilterConfigFactory
-  Network::ListenerFilterFactoryCb createListenerFilterFactoryFromProto(
+  // NamedUdpListenerFilterConfigFactory
+  Network::UdpListenerFilterFactoryCb createFilterFactoryFromProto(
       const Protobuf::Message& message,
-      const Network::ListenerFilterMatcherSharedPtr& listener_filter_matcher,
       Server::Configuration::ListenerFactoryContext& context) override {
 
     // downcast it to the DTLS inspector config
@@ -28,11 +28,11 @@ public:
         const envoy::extensions::filters::listener::dtls_inspector::v3::DtlsInspector&>(
         message, context.messageValidationVisitor());
 
-    ConfigSharedPtr config = std::make_shared<Config>(context.scope(), proto_config);
-    return
-        [listener_filter_matcher, config](Network::ListenerFilterManager& filter_manager) -> void {
-          filter_manager.addAcceptFilter(listener_filter_matcher, std::make_unique<Filter>(config));
-        };
+    auto shared_config= std::make_shared<Config>(context.scope(), proto_config);
+    return [shared_config](Network::UdpListenerFilterManager& filter_manager,
+                           Network::UdpReadFilterCallbacks& callbacks) -> void {
+      filter_manager.addReadFilter(std::make_unique<DtlsFilter>(callbacks, shared_config));
+    };
   }
 
   ProtobufTypes::MessagePtr createEmptyConfigProto() override {
@@ -47,7 +47,7 @@ public:
  * Static registration for the TLS inspector filter. @see RegisterFactory.
  */
 REGISTER_FACTORY(DtlsInspectorConfigFactory,
-                 Server::Configuration::NamedListenerFilterConfigFactory){
+                 Server::Configuration::NamedUdpListenerFilterConfigFactory){
     "envoy.listener.dtls_inspector"};
 
 } // namespace DtlsInspector

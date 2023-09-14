@@ -28,6 +28,67 @@ namespace ListenerFilters {
 namespace DtlsInspector {
 namespace {
 
+} // namespace
+
+Network::FilterStatus DtlsFilter::onData(Network::UdpRecvData& client_request) {
+  ENVOY_LOG(trace, "dtls inspector: recv: {}");
+
+  ENVOY_LOG(debug, "got dtls session: downstream={} local={}", client_request.addresses_.peer_->asStringView(), client_request.addresses_.local_->asStringView());
+
+
+  /* 
+  // Because we're doing a MSG_PEEK, data we've seen before gets returned every time, so
+  // skip over what we've already processed.
+  if (static_cast<uint64_t>(raw_slice.len_) > read_) {
+    const uint8_t* data = static_cast<const uint8_t*>(raw_slice.mem_) + read_;
+    const size_t len = raw_slice.len_ - read_;
+    const uint64_t bytes_already_processed = read_;
+    read_ = raw_slice.len_;
+    ParseState parse_state = parseClientHello(data, len, bytes_already_processed);
+    switch (parse_state) {
+    case ParseState::Error:
+      cb_->socket().ioHandle().close();
+      return Network::FilterStatus::StopIteration;
+    case ParseState::Done:
+      // Finish the inspect.
+      return Network::FilterStatus::Continue;
+    case ParseState::Continue:
+      // Do nothing but wait for the next event.
+      return Network::FilterStatus::StopIteration;
+    }
+    IS_ENVOY_BUG("unexpected tcp filter parse_state");
+  }*/
+  return Network::FilterStatus::StopIteration;
+}
+
+Network::FilterStatus DtlsFilter::onReceiveError(Api::IoError::IoErrorCode error_code) {
+  config_->stats().downstream_rx_errors_.inc();
+  UNREFERENCED_PARAMETER(error_code);
+
+  return Network::FilterStatus::StopIteration;
+}
+
+DtlsFilter::DtlsFilter(Network::UdpReadFilterCallbacks& callbacks,
+                     const DtlsConfigSharedPtr& config)
+    : UdpListenerReadFilter(callbacks), config_(config), listener_(callbacks.udpListener()) {}
+
+
+Config::Config(
+    Stats::Scope& scope,
+    const envoy::extensions::filters::listener::dtls_inspector::v3::DtlsInspector& proto_config,
+    uint32_t max_client_hello_size)
+    : stats_{ALL_DTLS_INSPECTOR_STATS(POOL_COUNTER_PREFIX(scope, "dtls_inspector."),
+                                     POOL_HISTOGRAM_PREFIX(scope, "dtls_inspector."))},
+      ssl_ctx_(SSL_CTX_new(DTLS_with_buffers_method())),
+      enable_ja3_fingerprinting_(
+          PROTOBUF_GET_WRAPPED_OR_DEFAULT(proto_config, enable_ja3_fingerprinting, false)),
+      max_client_hello_size_(max_client_hello_size),
+      initial_read_buffer_size_(
+          std::min(PROTOBUF_GET_WRAPPED_OR_DEFAULT(proto_config, initial_read_buffer_size,
+                                                   max_client_hello_size),
+                   max_client_hello_size)) {
+                   }
+/*
 uint64_t computeClientHelloSize(const BIO* bio, uint64_t prior_bytes_read,
                                 size_t original_bio_length) {
   const uint8_t* remaining_buffer;
@@ -38,9 +99,7 @@ uint64_t computeClientHelloSize(const BIO* bio, uint64_t prior_bytes_read,
   const size_t processed_bio_bytes = original_bio_length - remaining_bytes;
   return processed_bio_bytes + prior_bytes_read;
 }
-
 } // namespace
-
 // Min/max TLS version recognized by the underlying TLS/SSL library.
 const unsigned Config::TLS_MIN_SUPPORTED_VERSION = TLS1_VERSION;
 const unsigned Config::TLS_MAX_SUPPORTED_VERSION = TLS1_3_VERSION;
@@ -105,7 +164,6 @@ Filter::Filter(const ConfigSharedPtr& config)
 Network::FilterStatus Filter::onAccept(Network::ListenerFilterCallbacks& cb) {
   ENVOY_LOG(trace, "tls inspector: new connection accepted");
   cb_ = &cb;
-
   return Network::FilterStatus::StopIteration;
 }
 
@@ -141,33 +199,6 @@ void Filter::onServername(absl::string_view name) {
   clienthello_success_ = true;
 }
 
-Network::FilterStatus Filter::onData(Network::ListenerFilterBuffer& buffer) {
-  auto raw_slice = buffer.rawSlice();
-  ENVOY_LOG(trace, "tls inspector: recv: {}", raw_slice.len_);
-
-  // Because we're doing a MSG_PEEK, data we've seen before gets returned every time, so
-  // skip over what we've already processed.
-  if (static_cast<uint64_t>(raw_slice.len_) > read_) {
-    const uint8_t* data = static_cast<const uint8_t*>(raw_slice.mem_) + read_;
-    const size_t len = raw_slice.len_ - read_;
-    const uint64_t bytes_already_processed = read_;
-    read_ = raw_slice.len_;
-    ParseState parse_state = parseClientHello(data, len, bytes_already_processed);
-    switch (parse_state) {
-    case ParseState::Error:
-      cb_->socket().ioHandle().close();
-      return Network::FilterStatus::StopIteration;
-    case ParseState::Done:
-      // Finish the inspect.
-      return Network::FilterStatus::Continue;
-    case ParseState::Continue:
-      // Do nothing but wait for the next event.
-      return Network::FilterStatus::StopIteration;
-    }
-    IS_ENVOY_BUG("unexpected tcp filter parse_state");
-  }
-  return Network::FilterStatus::StopIteration;
-}
 
 ParseState Filter::parseClientHello(const void* data, size_t len,
                                     uint64_t bytes_already_processed) {
@@ -353,7 +384,7 @@ void Filter::createJA3Hash(const SSL_CLIENT_HELLO* ssl_client_hello) {
     cb_->socket().setJA3Hash(md5);
   }
 }
-
+*/
 } // namespace DtlsInspector
 } // namespace ListenerFilters
 } // namespace Extensions

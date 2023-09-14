@@ -28,6 +28,7 @@ namespace DtlsInspector {
   COUNTER(alpn_not_found)                                                                          \
   COUNTER(sni_found)                                                                               \
   COUNTER(sni_not_found)                                                                           \
+  COUNTER(downstream_rx_errors)                                                                    \
   HISTOGRAM(bytes_processed, Bytes)
 
 /**
@@ -46,7 +47,7 @@ enum class ParseState {
   Error
 };
 /**
- * Global configuration for TLS inspector.
+ * Global configuration for DTLS inspector.
  */
 class Config {
 public:
@@ -72,38 +73,39 @@ private:
   const uint32_t initial_read_buffer_size_;
 };
 
-using ConfigSharedPtr = std::shared_ptr<Config>;
+using DtlsConfigSharedPtr = std::shared_ptr<Config>;
 
 /**
- * TLS inspector listener filter.
+ * DTLS inspector listener filter.
  */
-class Filter : public Network::ListenerFilter, Logger::Loggable<Logger::Id::filter> {
+class DtlsFilter : public Network::UdpListenerReadFilter, Logger::Loggable<Logger::Id::filter> {
 public:
-  Filter(const ConfigSharedPtr& config);
+  DtlsFilter(Network::UdpReadFilterCallbacks& callbacks,
+            const DtlsConfigSharedPtr& config);
 
-  // Network::ListenerFilter
-  Network::FilterStatus onAccept(Network::ListenerFilterCallbacks& cb) override;
-  Network::FilterStatus onData(Network::ListenerFilterBuffer& buffer) override;
-  size_t maxReadBytes() const override { return requested_read_bytes_; }
+  // Network::UdpListenerReadFilter callbacks
+  Network::FilterStatus onData(Network::UdpRecvData& client_request) override;
+  Network::FilterStatus onReceiveError(Api::IoError::IoErrorCode error_code) override;
 
 private:
-  ParseState parseClientHello(const void* data, size_t len, uint64_t bytes_already_processed);
-  ParseState onRead();
-  void onALPN(const unsigned char* data, unsigned int len);
-  void onServername(absl::string_view name);
-  void createJA3Hash(const SSL_CLIENT_HELLO* ssl_client_hello);
-  uint32_t maxConfigReadBytes() const { return config_->maxClientHelloSize(); }
+  //ParseState parseClientHello(const void* data, size_t len, uint64_t bytes_already_processed);
+  //ParseState onRead();
+  //void onALPN(const unsigned char* data, unsigned int len);
+  //void onServername(absl::string_view name);
+  //void createJA3Hash(const SSL_CLIENT_HELLO* ssl_client_hello);
+  //uint32_t maxConfigReadBytes() const { return config_->maxClientHelloSize(); }
 
-  ConfigSharedPtr config_;
-  Network::ListenerFilterCallbacks* cb_{};
+  DtlsConfigSharedPtr config_;
+  //Network::ListenerFilterCallbacks* cb_{};
 
-  bssl::UniquePtr<SSL> ssl_;
-  uint64_t read_{0};
-  bool alpn_found_{false};
-  bool clienthello_success_{false};
+  Network::UdpListener& listener_;
+  //bssl::UniquePtr<SSL> ssl_;
+  //uint64_t read_{0};
+  //bool alpn_found_{false};
+  //bool clienthello_success_{false};
   // We dynamically adjust the number of bytes requested by the filter up to the
   // maxConfigReadBytes.
-  uint32_t requested_read_bytes_;
+  //uint32_t requested_read_bytes_;
 
   // Allows callbacks on the SSL_CTX to set fields in this class.
   friend class Config;

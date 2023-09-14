@@ -62,8 +62,6 @@ public:
   uint32_t initialReadBufferSize() const { return initial_read_buffer_size_; }
 
   static constexpr size_t TLS_MAX_CLIENT_HELLO = 64 * 1024;
-  static const unsigned TLS_MIN_SUPPORTED_VERSION;
-  static const unsigned TLS_MAX_SUPPORTED_VERSION;
 
 private:
   DtlsInspectorStats stats_;
@@ -81,31 +79,33 @@ using DtlsConfigSharedPtr = std::shared_ptr<Config>;
 class DtlsFilter : public Network::UdpListenerReadFilter, Logger::Loggable<Logger::Id::filter> {
 public:
   DtlsFilter(Network::UdpReadFilterCallbacks& callbacks,
-            const DtlsConfigSharedPtr& config);
+    const DtlsConfigSharedPtr& config);
+//  DtlsFilter(const DtlsConfigSharedPtr& config);
 
   // Network::UdpListenerReadFilter callbacks
+  Network::FilterStatus onAccept(Network::ListenerFilterCallbacks& cb);
   Network::FilterStatus onData(Network::UdpRecvData& client_request) override;
   Network::FilterStatus onReceiveError(Api::IoError::IoErrorCode error_code) override;
 
 private:
-  //ParseState parseClientHello(const void* data, size_t len, uint64_t bytes_already_processed);
+  ParseState parseClientHello(const void* data, size_t len, uint64_t bytes_already_processed);
   //ParseState onRead();
   //void onALPN(const unsigned char* data, unsigned int len);
-  //void onServername(absl::string_view name);
+  void onServername(absl::string_view name);
   //void createJA3Hash(const SSL_CLIENT_HELLO* ssl_client_hello);
-  //uint32_t maxConfigReadBytes() const { return config_->maxClientHelloSize(); }
+  uint32_t maxConfigReadBytes() const { return config_->maxClientHelloSize(); }
 
   DtlsConfigSharedPtr config_;
-  //Network::ListenerFilterCallbacks* cb_{};
+  Network::ListenerFilterCallbacks* cb_{};
 
   Network::UdpListener& listener_;
-  //bssl::UniquePtr<SSL> ssl_;
-  //uint64_t read_{0};
+  bssl::UniquePtr<SSL> ssl_;
+  uint64_t read_{0};
   //bool alpn_found_{false};
-  //bool clienthello_success_{false};
+  bool clienthello_success_{false};
   // We dynamically adjust the number of bytes requested by the filter up to the
   // maxConfigReadBytes.
-  //uint32_t requested_read_bytes_;
+  uint32_t requested_read_bytes_;
 
   // Allows callbacks on the SSL_CTX to set fields in this class.
   friend class Config;

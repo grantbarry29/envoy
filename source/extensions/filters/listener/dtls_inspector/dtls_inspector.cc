@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <sys/socket.h>
 #include <vector>
 
 #include "envoy/common/exception.h"
@@ -21,6 +22,13 @@
 #include "absl/strings/str_join.h"
 #include "openssl/md5.h"
 #include "openssl/ssl.h"
+#include <openssl/bio.h>
+#include "openssl/rand.h"
+#include "openssl/hmac.h"
+
+static constexpr size_t COOKIE_SECRET_LENGTH = 16;
+unsigned char cookie_secret_[COOKIE_SECRET_LENGTH];
+static bool cookie_secret_initialized = false;
 
 namespace Envoy {
 namespace Extensions {
@@ -29,6 +37,53 @@ namespace DtlsInspector {
 namespace {
 
 } // namespace
+
+void initializeCookieSecret() {
+  if (cookie_secret_initialized) {
+    return;
+  }
+
+  if (!RAND_bytes(cookie_secret_, COOKIE_SECRET_LENGTH)) {
+    throw EnvoyException(fmt::format("Failed to crete cookie secret"));
+  }
+
+  cookie_secret_initialized = true;
+}
+
+static void generateHMAC(const unsigned char *data, size_t data_len, const unsigned char *key,
+                           size_t key_len, unsigned char *hmac_result, unsigned int *hmac_len) {
+    HMAC_CTX ctx;
+    HMAC_CTX_init(&ctx);
+    HMAC_Init_ex(&ctx, key, key_len, EVP_sha256(), nullptr);
+    HMAC_Update(&ctx, data, data_len);
+    HMAC_Final(&ctx, hmac_result, hmac_len);
+    HMAC_CTX_cleanup(&ctx);
+}
+
+
+int generateCookie(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len) {
+    struct sockaddr_in peer_addr;
+    socklen_t peer_addr_len = sizeof(peer_addr);
+
+    getpeername(SSL_get_fd(ssl), reinterpret_cast<struct sockaddr*>(&peer_addr), &peer_addr_len);
+
+    // Create data for HMAC calculation (peer IP and port)
+    std::vector<unsigned char> data;
+    data.insert(data.end(), reinterpret_cast<unsigned char *>(&peer_addr.sin_addr), reinterpret_cast<unsigned char *>(&peer_addr.sin_addr + 4));  // Assuming IPv4 address
+    data.push_back(static_cast<unsigned char>((peer_addr.sin_port >> 8) & 0xFF));
+    data.push_back(static_cast<unsigned char>(peer_addr.sin_port & 0xFF));
+
+    // Calculate HMAC
+    unsigned char hmac_result[SHA256_DIGEST_LENGTH];
+    unsigned int hmac_len = SHA256_DIGEST_LENGTH;
+    generateHMAC(data.data(), data.size(), cookie_secret_, COOKIE_SECRET_LENGTH, hmac_result, &hmac_len);
+
+    // Copy the HMAC to the cookie
+    memcpy(cookie, hmac_result, hmac_len);
+    *cookie_len = hmac_len;
+
+    return 1;
+}
 
 Network::FilterStatus DtlsFilter::onData(Network::UdpRecvData& client_request) {
   ENVOY_LOG(trace, "dtls inspector: recv: {}");
@@ -70,8 +125,11 @@ Network::FilterStatus DtlsFilter::onReceiveError(Api::IoError::IoErrorCode error
 
 DtlsFilter::DtlsFilter(Network::UdpReadFilterCallbacks& callbacks,
                      const DtlsConfigSharedPtr& config)
-    : UdpListenerReadFilter(callbacks), config_(config), listener_(callbacks.udpListener()) {}
+    : UdpListenerReadFilter(callbacks), config_(config), listener_(callbacks.udpListener()) {
+  SSL_set_app_data(ssl_.get(), this);
+  SSL_set_accept_state(ssl_.get());
 
+}
 
 Config::Config(
     Stats::Scope& scope,
@@ -87,8 +145,48 @@ Config::Config(
           std::min(PROTOBUF_GET_WRAPPED_OR_DEFAULT(proto_config, initial_read_buffer_size,
                                                    max_client_hello_size),
                    max_client_hello_size)) {
-                   }
-/*
+  if (max_client_hello_size_ > TLS_MAX_CLIENT_HELLO) {
+    throw EnvoyException(fmt::format("max_client_hello_size of {} is greater than maximum of {}.",
+                                     max_client_hello_size_, size_t(TLS_MAX_CLIENT_HELLO)));
+  }
+
+  // initialize secret for cookie
+  initializeCookieSecret();
+
+  SSL_CTX_set_min_proto_version(ssl_ctx_.get(), DTLS1_2_VERSION);
+  SSL_CTX_set_session_cache_mode(ssl_ctx_.get(), SSL_SESS_CACHE_OFF);
+  //SSL_set_cookie(ssl, generateCookie, verifyCookie);
+  //SSL_CTX_set_cookie_generation_callback(ssl_ctx_.get(), generateCookie);
+  SSL_CTX_set_tlsext_servername_callback(
+      ssl_ctx_.get(), [](SSL* ssl, int* out_alert, void*) -> int {
+        DtlsFilter* filter = static_cast<DtlsFilter*>(SSL_get_app_data(ssl));
+        filter->onServername(
+            absl::NullSafeStringView(SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name)));
+
+        // Return an error to stop the handshake; we have what we wanted already.
+        *out_alert = SSL_AD_USER_CANCELLED;
+        return SSL_TLSEXT_ERR_ALERT_FATAL;
+      });
+}
+
+Network::FilterStatus DtlsFilter::onAccept(Network::ListenerFilterCallbacks& cb) {
+  ENVOY_LOG(trace, "Dtls inspector: new connection accepted");
+  cb_ = &cb;
+
+  return Network::FilterStatus::StopIteration;
+}
+
+void DtlsFilter::onServername(absl::string_view name) {
+  if (!name.empty()) {
+    config_->stats().sni_found_.inc();
+    cb_->socket().setRequestedServerName(name);
+    ENVOY_LOG(debug, "Dtls:onServerName(), requestedServerName: {}", name);
+  } else {
+    config_->stats().sni_not_found_.inc();
+  }
+  clienthello_success_ = true;
+}
+
 uint64_t computeClientHelloSize(const BIO* bio, uint64_t prior_bytes_read,
                                 size_t original_bio_length) {
   const uint8_t* remaining_buffer;
@@ -99,6 +197,60 @@ uint64_t computeClientHelloSize(const BIO* bio, uint64_t prior_bytes_read,
   const size_t processed_bio_bytes = original_bio_length - remaining_bytes;
   return processed_bio_bytes + prior_bytes_read;
 }
+
+ParseState DtlsFilter::parseClientHello(const void* data, size_t len,
+                                    uint64_t bytes_already_processed) {
+  // Ownership remains here though we pass a reference to it in `SSL_set0_rbio()`.
+  bssl::UniquePtr<BIO> bio(BIO_new_mem_buf(data, len));
+
+  // Make the mem-BIO return that there is more data
+  // available beyond it's end.
+  BIO_set_mem_eof_return(bio.get(), -1);
+
+  // We only do reading as we abort the handshake early.
+  SSL_set0_rbio(ssl_.get(), bssl::UpRef(bio).release());
+
+  int ret = SSL_do_handshake(ssl_.get());
+
+  // This should never succeed because an error is always returned from the SNI callback.
+  ASSERT(ret <= 0);
+  ParseState state = [this, ret]() {
+    switch (SSL_get_error(ssl_.get(), ret)) {
+    case SSL_ERROR_WANT_READ:
+      if (read_ == maxConfigReadBytes()) {
+        // We've hit the specified size limit. This is an unreasonably large ClientHello;
+        // indicate failure.
+        config_->stats().client_hello_too_large_.inc();
+        return ParseState::Error;
+      }
+      if (read_ == requested_read_bytes_) {
+        // Double requested bytes up to the maximum configured.
+        requested_read_bytes_ = std::min<uint32_t>(2 * requested_read_bytes_, maxConfigReadBytes());
+      }
+      return ParseState::Continue;
+    case SSL_ERROR_SSL:
+      if (clienthello_success_) {
+        config_->stats().tls_found_.inc();
+        cb_->socket().setDetectedTransportProtocol("dtls");
+      } else {
+        config_->stats().tls_not_found_.inc();
+      }
+      return ParseState::Done;
+    default:
+      return ParseState::Error;
+    }
+  }();
+
+  if (state != ParseState::Continue) {
+    // Record bytes analyzed as we're done processing.
+    config_->stats().bytes_processed_.recordValue(
+        computeClientHelloSize(bio.get(), bytes_already_processed, len));
+  }
+
+  return state;
+}
+
+/*
 } // namespace
 // Min/max TLS version recognized by the underlying TLS/SSL library.
 const unsigned Config::TLS_MIN_SUPPORTED_VERSION = TLS1_VERSION;

@@ -126,8 +126,8 @@ Network::FilterStatus DtlsFilter::onReceiveError(Api::IoError::IoErrorCode error
 DtlsFilter::DtlsFilter(Network::UdpReadFilterCallbacks& callbacks,
                      const DtlsConfigSharedPtr& config)
     : UdpListenerReadFilter(callbacks), config_(config), listener_(callbacks.udpListener()) {
-  SSL_set_app_data(ssl_.get(), this);
-  SSL_set_accept_state(ssl_.get());
+  // SSL_set_app_data(ssl_.get(), this);
+  // SSL_set_accept_state(ssl_.get());
 
 }
 

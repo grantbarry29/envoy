@@ -9,6 +9,36 @@ namespace Extensions {
 namespace UdpFilters {
 namespace UdpProxy {
 
+UdpProxyFilterConfig::UdpProxyFilterConfig()
+    : ssl_ctx_(SSL_CTX_new(DTLS_with_buffers_method())) {
+
+  SSL_CTX_set_min_proto_version(ssl_ctx_.get(), DTLS1_2_VERSION);
+  SSL_CTX_set_session_cache_mode(ssl_ctx_.get(), SSL_SESS_CACHE_OFF);
+  SSL_CTX_set_tlsext_servername_callback(
+      ssl_ctx_.get(), [](SSL* ssl, int* out_alert, void*) -> int {
+        UdpProxyFilter* filter = static_cast<UdpProxyFilter*>(SSL_get_app_data(ssl));
+        filter->onServername(
+            absl::NullSafeStringView(SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name)));
+
+        // Return an error to stop the handshake; we have what we wanted already.
+        *out_alert = SSL_AD_USER_CANCELLED;
+        return SSL_TLSEXT_ERR_ALERT_FATAL;
+      });
+}
+
+void UdpProxyFilter::onServername(absl::string_view name) {
+  if (!name.empty()) {
+    config_->stats().sni_found_.inc();
+    // TODO: XXX: Figure out how to do this from callbacks
+    //cb_->socket().setRequestedServerName(name);
+    ENVOY_LOG(debug, "Dtls:onServerName(), requestedServerName: {}", name);
+  } else {
+    ENVOY_LOG(debug, "Dtls: Server name not found");
+    config_->stats().sni_not_found_.inc();
+  }
+  clienthello_success_ = true;
+}
+
 UdpProxyFilter::UdpProxyFilter(Network::UdpReadFilterCallbacks& callbacks,
                                const UdpProxyFilterConfigSharedPtr& config)
     : UdpListenerReadFilter(callbacks), config_(config),

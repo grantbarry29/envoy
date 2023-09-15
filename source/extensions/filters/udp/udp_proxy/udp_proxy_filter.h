@@ -28,6 +28,8 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 
+#include "openssl/ssl.h"
+
 namespace Envoy {
 namespace Extensions {
 namespace UdpFilters {
@@ -48,6 +50,8 @@ using namespace UdpProxy::SessionFilters;
   COUNTER(downstream_sess_tx_datagrams)                                                            \
   COUNTER(downstream_sess_tx_errors)                                                               \
   COUNTER(idle_timeout)                                                                            \
+  COUNTER(sni_found)                                                                               \
+  COUNTER(sni_not_found)                                                                           \
   GAUGE(downstream_sess_active, Accumulate)
 
 /**
@@ -76,6 +80,7 @@ struct UdpProxyUpstreamStats {
 
 class UdpProxyFilterConfig {
 public:
+  UdpProxyFilterConfig();
   virtual ~UdpProxyFilterConfig() = default;
 
   virtual const std::string route(const Network::Address::Instance& destination_address,
@@ -93,6 +98,10 @@ public:
   virtual const std::vector<AccessLog::InstanceSharedPtr>& sessionAccessLogs() const PURE;
   virtual const std::vector<AccessLog::InstanceSharedPtr>& proxyAccessLogs() const PURE;
   virtual const FilterChainFactory& sessionFilterFactory() const PURE;
+  bssl::UniquePtr<SSL> newSsl();
+
+private:
+  bssl::UniquePtr<SSL_CTX> ssl_ctx_;
 };
 
 using UdpProxyFilterConfigSharedPtr = std::shared_ptr<const UdpProxyFilterConfig>;
@@ -130,6 +139,9 @@ public:
 private:
   class ActiveSession;
   class ClusterInfo;
+  bssl::UniquePtr<SSL> ssl_;
+  void onServername(absl::string_view name);
+  bool clienthello_success_{false};
 
   struct ActiveReadFilter : public virtual ReadFilterCallbacks, LinkedObject<ActiveReadFilter> {
     ActiveReadFilter(ActiveSession& parent, ReadFilterSharedPtr filter)
@@ -426,6 +438,9 @@ private:
   absl::flat_hash_map<std::string, ClusterInfoPtr> cluster_infos_;
 
   absl::optional<StreamInfo::StreamInfoImpl> udp_proxy_stats_;
+
+  // Allows callbacks on the SSL_CTX to set fields in this class.
+  friend class UdpProxyFilterConfig;
 };
 
 } // namespace UdpProxy

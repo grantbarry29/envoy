@@ -117,7 +117,7 @@ private:
 
 class UdpProxyFilter : public Network::UdpListenerReadFilter,
                        public Upstream::ClusterUpdateCallbacks,
-                       Logger::Loggable<Logger::Id::filter> {
+                       public Logger::Loggable<Logger::Id::filter> {
 public:
   UdpProxyFilter(Network::UdpReadFilterCallbacks& callbacks,
                  const UdpProxyFilterConfigSharedPtr& config);
@@ -420,6 +420,7 @@ private:
                             Upstream::ThreadLocalClusterCommand& get_cluster) final;
   void onClusterRemoval(const std::string& cluster_name) override;
 
+  protected: // TODO: Temporary!!
   const UdpProxyFilterConfigSharedPtr config_;
   const Upstream::ClusterUpdateCallbacksHandlePtr cluster_update_callbacks_;
   // Map for looking up cluster info with its name.

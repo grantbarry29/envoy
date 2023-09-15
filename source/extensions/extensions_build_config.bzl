@@ -211,6 +211,7 @@ EXTENSIONS = {
     # UDP filters
     #
 
+    "envoy.filters.udp_listener.dtls_proxy":                     "//source/extensions/filters/udp/udp_proxy/dtls_proxy:config",
     "envoy.filters.udp.dns_filter":                     "//source/extensions/filters/udp/dns_filter:config",
     "envoy.filters.udp_listener.udp_proxy":             "//source/extensions/filters/udp/udp_proxy:config",
 

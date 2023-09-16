@@ -2,7 +2,30 @@
 
 #include "envoy/network/listener.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <sys/socket.h>
+#include <vector>
+
 #include "source/common/network/socket_option_factory.h"
+#include "udp_proxy_filter.h"
+#include "openssl/ssl.h"
+#include <openssl/bio.h>
+#include "openssl/rand.h"
+#include "openssl/hmac.h"
+
+#include "envoy/common/exception.h"
+#include "envoy/common/platform.h"
+#include "envoy/event/dispatcher.h"
+#include "envoy/network/listen_socket.h"
+#include "envoy/stats/scope.h"
+
+#include "source/common/api/os_sys_calls_impl.h"
+#include "source/common/buffer/buffer_impl.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/hex.h"
+#include "source/common/protobuf/utility.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -39,11 +62,14 @@ void UdpProxyFilter::onServername(absl::string_view name) {
   clienthello_success_ = true;
 }
 
+bssl::UniquePtr<SSL> UdpProxyFilterConfig::newSsl() { return bssl::UniquePtr<SSL>{SSL_new(ssl_ctx_.get())}; }
+
 UdpProxyFilter::UdpProxyFilter(Network::UdpReadFilterCallbacks& callbacks,
                                const UdpProxyFilterConfigSharedPtr& config)
     : UdpListenerReadFilter(callbacks), config_(config),
       cluster_update_callbacks_(
-          config->clusterManager().addThreadLocalClusterUpdateCallbacks(*this)) {
+          config->clusterManager().addThreadLocalClusterUpdateCallbacks(*this)),
+      ssl_(config_->newSsl()) {
   for (const auto& entry : config_->allClusterNames()) {
     Upstream::ThreadLocalCluster* cluster = config->clusterManager().getThreadLocalCluster(entry);
     if (cluster != nullptr) {
@@ -52,6 +78,8 @@ UdpProxyFilter::UdpProxyFilter(Network::UdpReadFilterCallbacks& callbacks,
       };
       onClusterAddOrUpdate(cluster->info()->name(), command);
     }
+    SSL_set_app_data(ssl_.get(), this);
+    SSL_set_accept_state(ssl_.get());
   }
 
   if (!config_->proxyAccessLogs().empty()) {
@@ -96,16 +124,113 @@ void UdpProxyFilter::onClusterRemoval(const std::string& cluster) {
 }
 
 Network::FilterStatus UdpProxyFilter::onData(Network::UdpRecvData& data) {
-  const std::string& route = config_->route(*data.addresses_.local_, *data.addresses_.peer_);
-  if (!cluster_infos_.contains(route)) {
-    config_->stats().downstream_sess_no_route_.inc();
-    return Network::FilterStatus::StopIteration;
-  }
+  //auto raw_slice= client_request.rawSlice();
+  auto raw_slice = data.buffer_->frontSlice();
+  ENVOY_LOG(trace, "dtls inspector: UDP Proxy: recvd data");
 
-  return cluster_infos_[route]->onData(data);
+  ENVOY_LOG(debug, "got dtls session: downstream={} local={}", data.addresses_.peer_->asStringView(), data.addresses_.local_->asStringView());
+  const std::string& route = config_->route(*data.addresses_.local_, *data.addresses_.peer_);
+
+  // Because we're doing a MSG_PEEK, data we've seen before gets returned every time, so
+  // skip over what we've already processed.
+  if (static_cast<uint64_t>(raw_slice.len_) > read_) {
+    const unsigned char * data1 = static_cast<const unsigned char *>(raw_slice.mem_) + read_;
+    const size_t len = raw_slice.len_ - read_;
+    const uint64_t bytes_already_processed = read_;
+    read_ = raw_slice.len_;
+    ParseState parse_state = parseClientHello(data1, len, bytes_already_processed);
+//    ENVOY_LOG(debug, "Parsed state received is: {}", parse_state);
+
+    switch (parse_state) {
+    case ParseState::Error:
+      ENVOY_LOG(trace, "Parse state is Error");
+      //cb_->socket().ioHandle().close();
+      return Network::FilterStatus::StopIteration;
+    case ParseState::Done: {
+      ENVOY_LOG(trace, "Parse state is done");
+      if (!cluster_infos_.contains(route)) {
+          config_->stats().downstream_sess_no_route_.inc();
+          return Network::FilterStatus::StopIteration;
+        }
+        ENVOY_LOG(trace, "Transfering data to cluster");
+        return cluster_infos_[route]->onData(data);
+      }
+      // Finish the inspect.
+      return Network::FilterStatus::Continue;
+    case ParseState::Continue:
+      ENVOY_LOG(trace, "Parse state is Continue");
+      // Do nothing but wait for the next event.
+      return Network::FilterStatus::StopIteration;
+    }
+    IS_ENVOY_BUG("unexpected dtls udp proxy filter parse_state");
+  }
+    return Network::FilterStatus::StopIteration;
 }
 
+ParseState UdpProxyFilter::parseClientHello(const void* data, size_t len,
+                                    uint64_t bytes_already_processed) {
+  (void)bytes_already_processed;
+
+  ENVOY_LOG(trace, "ParseClient hello invoked");
+  // Ownership remains here though we pass a reference to it in `SSL_set0_rbio()`.
+  bssl::UniquePtr<BIO> bio(BIO_new_mem_buf(data, len));
+
+  // Make the mem-BIO return that there is more data
+  // available beyond it's end.
+  BIO_set_mem_eof_return(bio.get(), -1);
+
+  // We only do reading as we abort the handshake early.
+  SSL_set0_rbio(ssl_.get(), bssl::UpRef(bio).release());
+
+  ENVOY_LOG(trace, "ParseClient doing SSL handshake");
+  int ret = SSL_do_handshake(ssl_.get());
+
+  // This should never succeed because an error is always returned from the SNI callback.
+  ASSERT(ret <= 0);
+  ParseState state = [this, ret]() {
+    switch (SSL_get_error(ssl_.get(), ret)) {
+    case SSL_ERROR_WANT_READ:
+      if (read_ == 65535) {
+        // We've hit the specified size limit. This is an unreasonably large ClientHello;
+        // indicate failure.
+        //config_->stats().client_hello_too_large_.inc();
+        ENVOY_LOG(trace, "ParseClientHello: WANT_READ PARSE ERROR");
+        return ParseState::Error;
+      }
+      if (read_ == requested_read_bytes_) {
+        // Double requested bytes up to the maximum configured.
+        requested_read_bytes_ = std::min<uint32_t>(2 * requested_read_bytes_, maxConfigReadBytes());
+      }
+      ENVOY_LOG(trace, "ParseClientHello: WANT_READ PARSE CONTINUE");
+      return ParseState::Continue;
+    case SSL_ERROR_SSL:
+      if (clienthello_success_) {
+        config_->stats().dtls_found_.inc();
+        ENVOY_LOG(trace, "ParseClientHello: ERR_SSL DTLS FOUND");
+        //cb_->socket().setDetectedTransportProtocol("dtls");
+      } else {
+        config_->stats().dtls_not_found_.inc();
+        ENVOY_LOG(trace, "ParseClientHello: ERR_SSL DTLS NOT FOUND");
+      }
+      return ParseState::Done;
+    default:
+        ENVOY_LOG(trace, "ParseClientHello: PARSE STATE ERROR");
+      return ParseState::Error;
+    }
+  }();
+
+  if (state != ParseState::Continue) {
+    // Record bytes analyzed as we're done processing.
+    //config_->stats().bytes_processed_.recordValue(
+    //    computeClientHelloSize(bio.get(), bytes_already_processed, len));
+  }
+  //ENVOY_LOG(debug, "ParseClientHello: PARSE STATE returning {}", state);
+  return state;
+}
+
+
 Network::FilterStatus UdpProxyFilter::onReceiveError(Api::IoError::IoErrorCode) {
+  ENVOY_LOG(trace, "OnReceiveError hit");
   config_->stats().downstream_sess_rx_errors_.inc();
 
   return Network::FilterStatus::StopIteration;

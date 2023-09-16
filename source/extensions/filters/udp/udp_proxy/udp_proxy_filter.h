@@ -52,7 +52,9 @@ using namespace UdpProxy::SessionFilters;
   COUNTER(idle_timeout)                                                                            \
   COUNTER(sni_found)                                                                               \
   COUNTER(sni_not_found)                                                                           \
-  GAUGE(downstream_sess_active, Accumulate)
+  COUNTER(dtls_found)                                                                              \
+  COUNTER(dtls_not_found)                                                                          \
+  GAUGE(downstream_sess_active, Accumulate)                                                        \
 
 /**
  * Struct definition for all UDP proxy downstream stats. @see stats_macros.h
@@ -76,6 +78,15 @@ struct UdpProxyDownstreamStats {
  */
 struct UdpProxyUpstreamStats {
   ALL_UDP_PROXY_UPSTREAM_STATS(GENERATE_COUNTER_STRUCT)
+};
+
+enum class ParseState {
+  // Parse result is out. It could be tls or not.
+  Done,
+  // Parser expects more data.
+  Continue,
+  // Parser reports unrecoverable error.
+  Error
 };
 
 class UdpProxyFilterConfig {
@@ -104,7 +115,7 @@ private:
   bssl::UniquePtr<SSL_CTX> ssl_ctx_;
 };
 
-using UdpProxyFilterConfigSharedPtr = std::shared_ptr<const UdpProxyFilterConfig>;
+using UdpProxyFilterConfigSharedPtr = std::shared_ptr<UdpProxyFilterConfig>;
 
 /**
  * Currently, it only implements the hash based routing.
@@ -139,9 +150,13 @@ public:
 private:
   class ActiveSession;
   class ClusterInfo;
-  bssl::UniquePtr<SSL> ssl_;
   void onServername(absl::string_view name);
   bool clienthello_success_{false};
+  ParseState parseClientHello(const void* data, size_t len, uint64_t bytes_already_processed);
+  uint64_t read_{0};
+  uint32_t requested_read_bytes_{65536};
+  //const uint32_t max_client_hello_size_;
+  uint32_t maxConfigReadBytes() const { return 65536; }
 
   struct ActiveReadFilter : public virtual ReadFilterCallbacks, LinkedObject<ActiveReadFilter> {
     ActiveReadFilter(ActiveSession& parent, ReadFilterSharedPtr filter)
@@ -432,13 +447,14 @@ private:
                             Upstream::ThreadLocalClusterCommand& get_cluster) final;
   void onClusterRemoval(const std::string& cluster_name) override;
 
-  const UdpProxyFilterConfigSharedPtr config_;
+  UdpProxyFilterConfigSharedPtr config_;
   const Upstream::ClusterUpdateCallbacksHandlePtr cluster_update_callbacks_;
   // Map for looking up cluster info with its name.
   absl::flat_hash_map<std::string, ClusterInfoPtr> cluster_infos_;
 
   absl::optional<StreamInfo::StreamInfoImpl> udp_proxy_stats_;
 
+  bssl::UniquePtr<SSL> ssl_;
   // Allows callbacks on the SSL_CTX to set fields in this class.
   friend class UdpProxyFilterConfig;
 };
